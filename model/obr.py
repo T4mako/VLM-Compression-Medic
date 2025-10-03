@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Tuple, Optional
-from ..logger import logger
+from logger import logger
 
 def compute_hessian_approx(activations: torch.Tensor) -> torch.Tensor:
     """H = 2 * X * X^T"""

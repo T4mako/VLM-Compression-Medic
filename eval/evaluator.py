@@ -1,7 +1,7 @@
 import torch
 from transformers import AutoTokenizer
-from ..logger import logger
-from ..config import Config
+from logger import logger
+from config import Config
 
 class PerplexityEvaluator:
     def __init__(self, model, processor, config: Config):

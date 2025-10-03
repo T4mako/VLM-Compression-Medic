@@ -1,6 +1,6 @@
 from transformers import AutoModelForCausalLM, AutoProcessor
-from .obr import apply_obr_to_linear
-from ..logger import logger
+from obr import apply_obr_to_linear
+from logger import logger
 import torch
 
 def load_huatuo_vision_model(model_name: str, device: str = "cuda"):

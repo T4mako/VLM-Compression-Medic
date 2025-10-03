@@ -1,9 +1,9 @@
 import swanlab
-from ..config import Config
-from ..logger import logger
-from ..model.load_model import load_huatuo_vision_model
-from ..model.obr import apply_obr_to_linear
-from ..data.dataset import load_pubmed_vision
+from config import Config
+from logger import logger
+from model.load_model import load_huatuo_vision_model
+from model.obr import apply_obr_to_linear
+from data.dataset import load_pubmed_vision
 import torch
 
 class OBRTrainer:

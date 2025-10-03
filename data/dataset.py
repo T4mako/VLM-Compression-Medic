@@ -5,8 +5,8 @@ from pathlib import Path
 from PIL import Image
 from datasets import load_from_disk, load_dataset
 from typing import Dict, List, Optional
-from ..config import Config
-from ..logger import logger
+from config import Config
+from logger import logger
 
 _DATASET_LOCAL_ROOT = None
 
