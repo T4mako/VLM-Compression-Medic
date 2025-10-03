@@ -1,5 +1,5 @@
 from transformers import AutoModelForCausalLM, AutoProcessor
-from ..model.obr import apply_obr_to_linear
+from model.obr import apply_obr_to_linear
 from logger import logger
 import torch
 
