@@ -41,7 +41,7 @@ def load_huatuo_vision_model(
             cache_dir=cache_dir
         ).to(device)
 
-    print("Weight dtype:", model.language_model.model.layers[0].self_attn.q_proj.weight.dtype)
+    print("Weight dtype:", model.language_model.layers[0].self_attn.q_proj.weight.dtype)
         
     # 加载 processor
     processor = AutoProcessor.from_pretrained(
