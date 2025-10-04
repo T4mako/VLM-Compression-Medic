@@ -19,8 +19,10 @@ class OBRTrainer:
     def calibrate_activations(self, model, processor, calib_data):
         """Hook to collect activations for Hessian"""
         activations = {}
+        
 
         def hook_fn(module, input, output, name):
+            print(f"[DEBUG] Activation shape for {name}: {input[0].shape}")
             if isinstance(input, tuple):
                 input = input[0]
             if name not in activations:
