@@ -52,12 +52,12 @@ class OBRTrainer:
 
     def compress_model(self):
         model, processor = model, processor = load_huatuo_vision_model(
-            Config.model.model_name,
-            device=Config.training.device,
-            vit_compress_mode=Config.model.vit_compress_mode,
-            vit_target_tokens=Config.model.vit_target_tokens
+            self.config.model.model_name,
+            device=self.config.training.device,
+            vit_compress_mode=self.config.model.vit_compress_mode,
+            vit_target_tokens=self.config.model.vit_target_tokens
         )
-        calib_data = load_pubmed_vision(Config)
+        calib_data = load_pubmed_vision(self.config)
         activations = self.calibrate_activations(model, processor, calib_data)
 
         # Compress language model
