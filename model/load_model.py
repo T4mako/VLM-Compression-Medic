@@ -1,15 +1,30 @@
-from transformers import AutoModelForCausalLM, AutoProcessor
+from transformers import AutoModelForCausalLM, AutoModelForVision2Seq, AutoProcessor
 from model.obr import apply_obr_to_linear
 from logger import logger
 import torch
 
 def load_huatuo_vision_model(model_name: str, device: str = "cuda"):
     logger.info(f"Loading model: {model_name}")
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        torch_dtype=torch.float16,
-        low_cpu_mem_usage=True,
-        trust_remote_code=True
-    ).to(device)
+    
+    # 根据模型名称选择合适的加载方式
+    if "Qwen2" in model_name and "VL" in model_name:
+        # Qwen2.5VL 使用 AutoModelForVision2Seq
+        logger.info(f"Loading Qwen VL model with AutoModelForVision2Seq")
+        model = AutoModelForVision2Seq.from_pretrained(
+            model_name,
+            torch_dtype=torch.float16,
+            low_cpu_mem_usage=True,
+            trust_remote_code=True
+        ).to(device)
+    else:
+        # 其他模型使用 AutoModelForCausalLM
+        logger.info(f"Loading model with AutoModelForCausalLM")
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            torch_dtype=torch.float16,
+            low_cpu_mem_usage=True,
+            trust_remote_code=True
+        ).to(device)
+        
     processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
     return model, processor
