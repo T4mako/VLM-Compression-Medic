@@ -15,6 +15,7 @@ class OBRTrainer:
                 name=config.training.swanlab_name
             )
 
+    # 注册 hook 采集每一层的输入激活，并返回平均激活值，为模型压缩（如 OBR、量化、低秩分解）提供统计基础
     def calibrate_activations(self, model, processor, calib_data):
         """Hook to collect activations for Hessian"""
         activations = {}
@@ -50,7 +51,12 @@ class OBRTrainer:
         return avg_activations
 
     def compress_model(self):
-        model, processor = load_huatuo_vision_model(self.config.model.model_name)
+        model, processor = model, processor = load_huatuo_vision_model(
+            config.model.model_name,
+            device=config.training.device,
+            vit_compress_mode=config.model.vit_compress_mode,
+            vit_target_tokens=config.model.vit_target_tokens
+        )
         calib_data = load_pubmed_vision(self.config)
         activations = self.calibrate_activations(model, processor, calib_data)
 
@@ -68,7 +74,20 @@ class OBRTrainer:
                     device=model.device
                 )
 
-        # TODO: compress vision encoder similarly
+        # compress vision encoder similarly
+        vision_encoder = getattr(model, self.config.model.vision_encoder_name)  # e.g. "vision_tower" or "vision_encoder"
+        for name, module in vision_encoder.named_modules():
+            if isinstance(module, torch.nn.Linear):
+                act = activations.get(name, torch.randn(module.in_features))
+                apply_obr_to_linear(
+                    module,
+                    act,
+                    bits=self.config.compression.vision_bits,
+                    sparsity=self.config.compression.vision_sparsity,
+                    alpha=self.config.compression.alpha,
+                    device=model.device
+                )
 
-        logger.info("Model compression completed!")
+
+        logger.info("Model compression (LM + Vision) completed!")
         return model, processor

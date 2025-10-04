@@ -4,6 +4,7 @@ from eval.evaluator import PerplexityEvaluator
 from data.dataset import load_pubmed_vision
 from model.load_model import load_huatuo_vision_model
 import argparse
+import logger
 
 def main():
     parser = argparse.ArgumentParser()
@@ -14,6 +15,7 @@ def main():
 
     if args.mode == "compress":
         trainer = OBRTrainer(config)
+        
         compressed_model, processor = trainer.compress_model()
         # Save model
         compressed_model.save_pretrained(f"{config.training.output_dir}/compressed")

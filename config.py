@@ -19,6 +19,8 @@ class ModelConfig:
     language_model_name: str = "language_model"
     use_rotation: bool = True
     rotation_type: str = "FlatQuant"  # "QuaRot", "SpinQuant", "FlatQuant"
+    vit_compress_mode: str = "pooling"      # "pooling" or "token_pruning"
+    vit_target_tokens: int = 64             # 推荐 64~100
 
 @dataclass
 class CompressionConfig:
