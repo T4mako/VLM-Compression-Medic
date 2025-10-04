@@ -16,6 +16,8 @@ def load_huatuo_vision_model(
     logger.info(f"Loading model: {model_name}")
     
     cache_dir = os.path.expanduser("~/.cache/huggingface/hub")
+
+    
     
     # 加载模型
     if "Qwen2" in model_name and "VL" in model_name:
@@ -38,6 +40,8 @@ def load_huatuo_vision_model(
             local_files_only=True,
             cache_dir=cache_dir
         ).to(device)
+
+    print("Weight dtype:", model.language_model.model.layers[0].self_attn.q_proj.weight.dtype)
         
     # 加载 processor
     processor = AutoProcessor.from_pretrained(
