@@ -51,8 +51,10 @@ def apply_obr_to_linear(
     """
     Apply OBR to a single linear layer.
     """
-    W = layer.weight.data.clone().to(device)
-    H = compute_hessian_approx(activations.to(device))
+    W = layer.weight.data.clone().to(device).to(torch.float32)  # 👈 转为 float32
+    H = compute_hessian_approx(activations.to(device).to(torch.float32))  # Hessian 也用 float32
+
+    logger.info(f"OBR: H shape={H.shape}, W shape={W.shape}, W dtype={W.dtype}")
 
     # Step 1: Pruning
     if pruning_mask is None:
