@@ -49,14 +49,22 @@ def apply_obr_to_linear(
     device: str = "cuda"
 ) -> nn.Linear:
     """
-    Apply OBR to a single linear layer.
+    对单个线性层应用 OBR 压缩算法
+    通过最优脑响应补偿来减少剪枝和量化带来的精度损失
     """
-    W = layer.weight.data.clone().to(device).to(torch.float32)  # 👈 转为 float32
-    H = compute_hessian_approx(activations.to(device).to(torch.float32))  # Hessian 也用 float32
+    # 复制原始权重并确保在 float32 精度
+    W = layer.weight.data.clone().to(device).to(torch.float32)
+    # 基于激活值计算 Hessian 矩阵的近似，用于评估权重重要性, 衡量每个权重对损失函数的影响程度
+    H = compute_hessian_approx(activations.to(device).to(torch.float32))
 
     logger.info(f"OBR: H shape={H.shape}, W shape={W.shape}, W dtype={W.dtype}")
 
-    # Step 1: Pruning
+    """
+    Step 1: 剪枝阶段
+    阈值计算：根据稀疏度sparsity计算权重绝对值的分位数
+    剪枝掩码：标记所有小于阈值的权重位置
+    权重剪枝：将不重要的权重置零
+    """
     if pruning_mask is None:
         # Default: magnitude-based pruning
         threshold = torch.quantile(W.abs(), sparsity)
@@ -65,13 +73,29 @@ def apply_obr_to_linear(
     W_pruned = W.clone()
     W_pruned[pruning_mask] = 0.0
 
-    # Step 2: OBR for pruning
+    """
+    Step 2: OBR剪枝补偿
+    误差计算：pruning_error - 被剪枝权重的原始值
+    补偿计算：使用OBR算法计算如何调整剩余权重来补偿剪枝损失
+    权重更新：W_comp - 剪枝后经过补偿的权重
+    """
     pruning_error = W[pruning_mask]
     eviction_mask_prune = pruning_mask.clone()
     comp_prune = obr_compensation(W_pruned, H, eviction_mask_prune, pruning_error, device)
     W_comp = W_pruned + comp_prune
 
-    # Step 3: OBR for quantization
+    """
+    Step 3: 量化阶段
+    找出所有未被剪枝的权重位置
+    根据alpha参数将未剪枝权重分为两组，R2（保留量化）和E2（驱逐量化）
+    E2：较小权重量化（占未剪枝权重的alpha比例）
+    R2：较大权重保持原始精度
+    
+    缩放因子：根据位宽bits计算量化缩放比例
+    伪量化：模拟量化过程但不实际改变数据类型
+    量化误差：计算伪量化引入的误差
+    误差补偿：使用OBR调整其他权重来补偿量化误差
+    """
     unpruned_indices = ~pruning_mask
     num_unpruned = unpruned_indices.sum().item()
     if num_unpruned == 0:
