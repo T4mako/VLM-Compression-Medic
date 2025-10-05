@@ -30,6 +30,7 @@ class OBRTrainer:
                 return
 
             target_dict = text_activations if branch_type == "text" else vision_activations
+            logger.info(f"======================={branch_type}target_dict:{target_dict}=========================")
             if name not in target_dict:
                 target_dict[name] = []
             target_dict[name].append(inp.detach().cpu())
