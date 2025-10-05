@@ -18,6 +18,24 @@ class OBRTrainer:
             )
 
     def calibrate_activations(self, model, processor, calib_data):
+        # 先打印模型的所有属性，找到正确的视觉编码器名称
+        print("模型所有属性:", [attr for attr in dir(model) if not attr.startswith('_')])
+
+        # 特别关注可能包含视觉组件的属性
+        vision_candidates = ['vision_model', 'vision_tower', 'visual', 'vision_encoder', 'vit']
+        for candidate in vision_candidates:
+            if hasattr(model, candidate):
+                print(f"找到视觉组件: {candidate}")
+
+        # 如果上述方法找不到，检查named_modules
+        print("模型所有模块:")
+        for name, module in model.named_modules():
+            if 'vision' in name.lower() or 'visual' in name.lower() or 'vit' in name.lower():
+                print(f"视觉相关模块: {name} - {type(module)}")
+
+        # 临时使用一个备选名称继续调试
+        vision_encoder_name = self.find_vision_encoder(model)
+        vision_encoder = getattr(model, vision_encoder_name)
         """
         分别收集文本分支和图像分支的激活值
         """
@@ -153,3 +171,36 @@ class OBRTrainer:
 
         logger.info("=== 模型压缩完成 ===")
         return model
+
+
+def find_vision_encoder(self, model):
+    """自动检测视觉编码器名称"""
+    possible_names = [
+        'vision_tower', 'vision_model', 'visual',
+        'vision_encoder', 'vit', 'model.vision_tower'
+    ]
+
+    for name in possible_names:
+        # 处理带点的嵌套属性
+        if '.' in name:
+            parts = name.split('.')
+            obj = model
+            try:
+                for part in parts:
+                    obj = getattr(obj, part)
+                return name
+            except AttributeError:
+                continue
+        elif hasattr(model, name):
+            return name
+
+    # 如果自动检测失败，回退到检查named_modules
+    for name, module in model.named_modules():
+        if isinstance(module, torch.nn.Module) and any(
+                keyword in name.lower() for keyword in ['vision', 'visual', 'vit', 'encoder']):
+            if 'text' not in name.lower() and 'language' not in name.lower():
+                logger.warning(f"自动选择视觉编码器: {name}")
+                # 这里需要根据实际结构返回正确的访问路径
+                return name.split('.')[-1]  # 返回最后一部分
+
+    raise AttributeError("无法找到视觉编码器，请检查模型结构")
