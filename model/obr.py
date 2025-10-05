@@ -111,126 +111,12 @@ def apply_obr_to_linear(
     layer.scale = scale.item()
     return layer
 
-    import torch
-    import torch.nn as nn
-    from typing import Optional
-    from logger import logger
-
-    def compute_hessian_approx(activations: torch.Tensor) -> torch.Tensor:
-        """
-        Compute Hessian approximation in the input-feature space.
-        Correct formula: H ≈ 2 * X^T X (shape: [Cin, Cin]) when activations X has shape [N, Cin].
-        """
-        if activations is None:
-            raise ValueError("activations is None in compute_hessian_approx")
-        x = activations
-        if x.dim() == 1:
-            x = x.unsqueeze(0)
-        H = 2.0 * torch.matmul(x.t(), x)
-        return H
-
-    def obr_compensation(
-            weights: torch.Tensor,
-            hessian: torch.Tensor,
-            eviction_mask: torch.Tensor,
-            error: torch.Tensor,
-            device: str = "cuda"
-    ) -> torch.Tensor:
-        """
-        Compute OBR compensation: Δw_R = -H_RR^{-1} H_RE e_E
-        All tensors are flattened 1D vectors.
-        """
-        if eviction_mask is None:
-            return torch.zeros_like(weights, device=device)
-
-        w_flat = weights.view(-1)
-        mask_flat = eviction_mask.view(-1).bool()
-        err_flat = error.view(-1)
-
-        R_mask = ~mask_flat
-        E_mask = mask_flat
-
-        if R_mask.sum() == 0 or E_mask.sum() == 0:
-            return torch.zeros_like(w_flat, device=device)
-
-        try:
-            H_RR = hessian[R_mask][:, R_mask]
-            H_RE = hessian[R_mask][:, E_mask]
-            e_E = err_flat[E_mask].to(device)
-
-            reg_eye = 1e-8 * torch.eye(H_RR.size(0), device=device, dtype=H_RR.dtype)
-            H_RR_inv = torch.linalg.inv(H_RR.to(device) + reg_eye)
-            delta_w_R = -torch.matmul(H_RR_inv, torch.matmul(H_RE.to(device), e_E))
-            comp = torch.zeros_like(w_flat, device=device)
-            comp[R_mask] = delta_w_R
-            return comp.view_as(weights)
-        except Exception as e:
-            logger.warning(f"OBR compensation failed: {e}, returning zero compensation")
-            return torch.zeros_like(weights, device=device)
-
-    def apply_obr_to_linear(
-            layer: nn.Linear,
-            activations: torch.Tensor,
-            bits: int = 4,
-            sparsity: float = 0.5,
-            alpha: float = 0.5,
-            device: str = "cuda"
-    ) -> nn.Linear:
-        """
-        Apply OBR to a single linear layer (pruning & quantization on input dimension).
-        """
-        W = layer.weight.data.clone().to(device).float()  # [out, in]
-        Cin = W.shape[1]
-
-        # Hessian on input dimension
-        if activations.dim() == 1:
-            activations = activations.unsqueeze(0)
-        H_in = compute_hessian_approx(activations.to(device).float())  # [Cin, Cin]
-
-        # === 1. Pruning on input channels ===
-        importance_per_input = W.abs().mean(dim=0)  # [Cin]
-        # 为了防止 quantile 爆炸，采样或 topk
-        num_inputs = importance_per_input.numel()
-        k = int(sparsity * num_inputs)
-        if k > 0:
-            topk_vals, _ = torch.topk(importance_per_input, k)
-            threshold = topk_vals.min()
-        else:
-            threshold = 0
-        prune_mask_input = importance_per_input < threshold  # [Cin]
-
-        # 应用剪枝
-        W_pruned = W.clone()
-        W_pruned[:, prune_mask_input] = 0.0
-
-        # === 2. Compensation ===
-        pruning_error = W - W_pruned
-        comp = obr_compensation(
-            W_pruned.mean(dim=0),  # 这里按输入维度聚合
-            H_in,
-            prune_mask_input,
-            pruning_error.mean(dim=0),
-            device
-        )
-        W_comp = W_pruned + comp.unsqueeze(0)  # broadcast to [out, in]
-
-        # === 3. Quantization ===
-        max_abs = W_comp.abs().max().clamp(min=1e-8)
-        scale = max_abs / ((2 ** (bits - 1)) - 1)
-        W_quant = torch.clamp(torch.round(W_comp / scale), -(2 ** (bits - 1)), 2 ** (bits - 1) - 1)
-        W_dequant = W_quant * scale
-
-        layer.weight.data = W_dequant.to(layer.weight.data.dtype)
-        layer.scale = scale.item()
-        return layer
-
-
 def apply_adaptive_pooling_to_linear(
-        layer: nn.Linear,
-        activations: torch.Tensor,
-        target_ratio: float = 0.5,
-        method: str = "adaptive_avg",
-        device: str = "cuda"
+    layer: nn.Linear,
+    activations: torch.Tensor,
+    target_ratio: float = 0.5,
+    method: str = "adaptive_avg",
+    device: str = "cuda"
 ) -> nn.Linear:
     """
     使用自适应池化压缩线性层
@@ -278,4 +164,3 @@ def apply_adaptive_pooling_to_linear(
         layer.bias.data = bias_pooled.view(target_out_features)
 
     return layer
-
