@@ -53,20 +53,24 @@ class OBRTrainer:
         return avg_activations
 
     def compress_model(self):
-        model, processor = model, processor = load_huatuo_vision_model(
+        model, processor = load_huatuo_vision_model(
             self.config.model.model_name,
             device=self.config.training.device,
             vit_compress_mode=self.config.model.vit_compress_mode,
             vit_target_tokens=self.config.model.vit_target_tokens
         )
+        # 打印模型结构，确认模型加载正确
+        logger.info(f"Model loaded: {self.config.model.model_name}")
         calib_data = load_pubmed_vision(self.config)
         activations = self.calibrate_activations(model, processor, calib_data)
+        logger.info(f"Activation calibration completed{activations}")
 
         # Compress language model
         lm = getattr(model, self.config.model.language_model_name)
         for name, module in lm.named_modules():
             if isinstance(module, torch.nn.Linear):
                 act = activations.get(name, torch.randn(module.in_features))
+                logger.info(f"Compressing layer {name} with activation shape {act.shape}")
                 apply_obr_to_linear(
                     module,
                     act,
