@@ -35,6 +35,8 @@ class CompressionConfig:
     vision_sparsity: float = 0.5
     vision_use_obr: bool = True
     vision_pruner: str = "WANDA"
+    vision_pooling_ratio: float = 0.7
+    pooling_method: str = "adaptive_avg"  # adaptive_avg or adaptive_max
 
     # Projector
     projector_bits: int = 16  # 16=FP16, 8=INT8
