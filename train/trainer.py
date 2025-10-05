@@ -18,24 +18,6 @@ class OBRTrainer:
             )
 
     def calibrate_activations(self, model, processor, calib_data):
-        # 先打印模型的所有属性，找到正确的视觉编码器名称
-        print("模型所有属性:", [attr for attr in dir(model) if not attr.startswith('_')])
-
-        # 特别关注可能包含视觉组件的属性
-        vision_candidates = ['vision_model', 'vision_tower', 'visual', 'vision_encoder', 'vit']
-        for candidate in vision_candidates:
-            if hasattr(model, candidate):
-                print(f"找到视觉组件: {candidate}")
-
-        # 如果上述方法找不到，检查named_modules
-        print("模型所有模块:")
-        for name, module in model.named_modules():
-            if 'vision' in name.lower() or 'visual' in name.lower() or 'vit' in name.lower():
-                print(f"视觉相关模块: {name} - {type(module)}")
-
-        # 临时使用一个备选名称继续调试
-        vision_encoder_name = self.find_vision_encoder(model)
-        vision_encoder = getattr(model, vision_encoder_name)
         """
         分别收集文本分支和图像分支的激活值
         """

@@ -14,7 +14,7 @@ class DataConfig:
 @dataclass
 class ModelConfig:
     model_name: str = "FreedomIntelligence/HuatuoGPT-Vision-7B-Qwen2.5VL"
-    vision_encoder_name: str = "vision_tower"
+    vision_encoder_name: str = "visual"
     projector_name: str = "mm_projector"
     language_model_name: str = "language_model"
     use_rotation: bool = True
