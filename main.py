@@ -6,6 +6,7 @@ from model.load_model import load_huatuo_vision_model
 import argparse
 import logger
 
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", type=str, choices=["compress", "eval"], default="compress")
@@ -15,7 +16,8 @@ def main():
 
     if args.mode == "compress":
         trainer = OBRTrainer(config)
-        
+
+        # 修改：现在返回 model 和 processor
         compressed_model, processor = trainer.compress_model()
         # Save model
         compressed_model.save_pretrained(f"{config.training.output_dir}/compressed")
@@ -27,6 +29,7 @@ def main():
         evaluator = PerplexityEvaluator(model, processor, config)
         results = evaluator.evaluate(eval_data)
         print("Evaluation Results:", results)
+
 
 if __name__ == "__main__":
     main()
