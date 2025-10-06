@@ -1,7 +1,7 @@
 import logging
 import sys
 
-def setup_logger(name="OBR-Med", level=logging.INFO):
+def setup_logger(name="OBR-Med", level=logging.DEBUG):
     logger = logging.getLogger(name)
     if logger.handlers:
         return logger

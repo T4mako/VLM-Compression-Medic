@@ -50,16 +50,21 @@ def load_huatuo_vision_model(
         local_files_only=True,
         cache_dir=cache_dir
     )
+    print(processor.tokenizer.special_tokens_map)
 
     # === 插入 Dynamic-VLM 的 ViT 压缩器 ===
-    # 假设 Qwen2.5-VL 的视觉编码器为 model.vision_model
-    if hasattr(model, 'vision_model'):
-        logger.info(f"Inserting DynamicViTCompressor (mode={vit_compress_mode}, tokens={vit_target_tokens})")
-        model.vit_compressor = DynamicViTCompressor(
+    # print(model)
+    # Qwen2.5-VL 的视觉 backbone 在 model.model.visual
+    if hasattr(model.model, 'visual'):
+        vision_model = model.model.visual
+        logger.info(
+            f"Inserting DynamicViTCompressor (mode={vit_compress_mode}, tokens={vit_target_tokens}) to vision backbone")
+        vision_model.vit_compressor = DynamicViTCompressor(
             mode=vit_compress_mode,
             target_tokens=vit_target_tokens
         ).to(device)
+        processor.image_token_length = 64
     else:
-        logger.warning("No 'vision_model' found in model. Skipping ViT compression.")
+        logger.warning("No visual backbone found. Skipping ViT compression.")
 
     return model, processor

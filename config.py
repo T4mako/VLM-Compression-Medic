@@ -4,12 +4,15 @@ from typing import Optional, List
 
 @dataclass
 class DataConfig:
-    local_root: str = "../machine-unlearning/data/PubMedVision_repo"
-    alignment_path: str = "../machine-unlearning/data/PubMedVision_Alignment_VQA"
+    local_root: str = "../machine-unlearning-VLM/data/PubMedVision_repo"
+    alignment_path: str = "../machine-unlearning-VLM/data/PubMedVision_Alignment_VQA"
     cache_dir: str = "./data/cache"
-    debug_limit: Optional[int] = None
+    debug_limit: Optional[int] = 512
     dn_ratio: float = 1.0  # 保留比例
     calib_size: int = 256  # 校准集大小
+    calib_batch_size: int = 8  # 校准时的批次大小
+    shuffle: bool = False  # 校准数据不需要shuffle
+    pin_memory: bool = True  # 加速数据传输到GPU
 
 @dataclass
 class ModelConfig:
