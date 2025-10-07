@@ -12,6 +12,7 @@ class DataConfig:
     calib_size: int = 256  # 校准集大小
     calib_batch_size: int = 4  # 校准时的批次大小
     num_workers: int = 0
+    pin_memory: bool = True
     shuffle: bool = False  # 校准数据不需要shuffle
     activation_cache_dir: str = "./data/activation_cache"  # 激活值缓存目录
     save_activations_to_disk: bool = True  # 保存激活值到磁盘
