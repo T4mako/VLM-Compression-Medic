@@ -11,6 +11,8 @@ from PIL import Image
 import os
 from qwen_vl_utils import process_vision_info
 from tqdm import tqdm  # 添加tqdm导入
+import time
+from datetime import timedelta
 
 
 class CalibrationDataset(Dataset):
@@ -329,8 +331,6 @@ class OBRTrainer:
         text_activations = activations_dict["text"]
         vision_activations = activations_dict["vision"]
 
-        fallback_batch = self.config.data.calib_batch_size
-
         # 文本分支：使用 OBR 压缩
         logger.info("=== 开始压缩文本分支（OBR）===")
         lm = getattr(model, self.config.model.language_model_name)
@@ -341,20 +341,35 @@ class OBRTrainer:
             if isinstance(module, torch.nn.Linear):
                 text_linear_layers.append((name, module))
 
-        logger.info(f"文本分支共有 {len(text_linear_layers)} 个线性层需要压缩")
+        total_text_layers = len(text_linear_layers)
+        logger.info(f"文本分支共有 {total_text_layers} 个线性层需要压缩")
 
         text_layers_processed = 0
         text_layers_failed = 0
+        start_time = time.time()
 
         # 使用tqdm显示进度条
-        with tqdm(total=len(text_linear_layers), desc="压缩文本分支", unit="layer") as pbar:
-            for name, module in text_linear_layers:
+        with tqdm(total=total_text_layers, desc="压缩文本分支", unit="layer") as pbar:
+            for idx, (name, module) in enumerate(text_linear_layers, 1):
                 full_name = f"text.{name}"
-                act = text_activations.get(full_name, None)
                 layer_device = next(module.parameters()).device
 
+                # 计算剩余时间预估
+                elapsed_time = time.time() - start_time
+                if text_layers_processed > 0:
+                    avg_time_per_layer = elapsed_time / text_layers_processed
+                    remaining_layers = total_text_layers - idx + 1
+                    remaining_time = avg_time_per_layer * remaining_layers
+                    remaining_str = str(timedelta(seconds=int(remaining_time)))
+                else:
+                    remaining_str = "计算中..."
+
+                logger.info(f"[文本层][{name}]开始处理({idx}/{total_text_layers}) | 剩余时间预估：{remaining_str}")
+
+                act = text_activations.get(full_name, None)
+
                 if act is None or act.numel() == 0:
-                    logger.warning(f"No text activations for layer {full_name}, skipping")
+                    logger.error(f"[文本层][{name}]处理失败({idx}/{total_text_layers}) | 原因：无激活值数据")
                     text_layers_failed += 1
                     pbar.update(1)
                     pbar.set_postfix({
@@ -371,8 +386,7 @@ class OBRTrainer:
 
                     # 检查激活值形状是否与权重匹配
                     if act.shape[-1] != module.in_features:
-                        logger.warning(
-                            f"Activation shape {act.shape} doesn't match weight shape {module.weight.shape} for {full_name}, skipping")
+                        logger.error(f"[文本层][{name}]处理失败({idx}/{total_text_layers}) | 原因：激活值形状不匹配 {act.shape} vs {module.weight.shape}")
                         text_layers_failed += 1
                         pbar.update(1)
                         pbar.set_postfix({
@@ -391,15 +405,18 @@ class OBRTrainer:
                         bits=self.config.compression.lm_bits,
                         sparsity=self.config.compression.lm_sparsity,
                         alpha=self.config.compression.alpha,
-                        device=str(layer_device)
+                        device=str(layer_device),
+                        layer_name=name,
+                        layer_idx=idx,
+                        total_layers=total_text_layers
                     )
 
                     if success:
                         text_layers_processed += 1
-                        logger.debug(f"文本层 {name} - OBR压缩完成")
+                        logger.info(f"[文本层][{name}]处理完成({idx}/{total_text_layers})")
                     else:
                         text_layers_failed += 1
-                        logger.warning(f"文本层 {name} - OBR压缩失败")
+                        logger.error(f"[文本层][{name}]处理失败({idx}/{total_text_layers}) | 原因：OBR压缩过程中出错")
 
                     # 更新进度条
                     pbar.update(1)
@@ -410,7 +427,7 @@ class OBRTrainer:
                     })
 
                 except Exception as e:
-                    logger.error(f"Error compressing text layer {name}: {e}")
+                    logger.error(f"[文本层][{name}]处理失败({idx}/{total_text_layers}) | 原因：{str(e)}")
                     text_layers_failed += 1
                     pbar.update(1)
                     pbar.set_postfix({
@@ -430,20 +447,35 @@ class OBRTrainer:
             if isinstance(module, torch.nn.Linear):
                 vision_linear_layers.append((name, module))
 
-        logger.info(f"视觉分支共有 {len(vision_linear_layers)} 个线性层需要压缩")
+        total_vision_layers = len(vision_linear_layers)
+        logger.info(f"视觉分支共有 {total_vision_layers} 个线性层需要压缩")
 
         vision_layers_processed = 0
         vision_layers_failed = 0
+        vision_start_time = time.time()
 
         # 使用tqdm显示进度条
-        with tqdm(total=len(vision_linear_layers), desc="压缩视觉分支", unit="layer") as pbar:
-            for name, module in vision_linear_layers:
+        with tqdm(total=total_vision_layers, desc="压缩视觉分支", unit="layer") as pbar:
+            for idx, (name, module) in enumerate(vision_linear_layers, 1):
                 full_name = f"vision.{name}"
-                act = vision_activations.get(full_name, None)
                 layer_device = next(module.parameters()).device
 
+                # 计算剩余时间预估
+                elapsed_time = time.time() - vision_start_time
+                if vision_layers_processed > 0:
+                    avg_time_per_layer = elapsed_time / vision_layers_processed
+                    remaining_layers = total_vision_layers - idx + 1
+                    remaining_time = avg_time_per_layer * remaining_layers
+                    remaining_str = str(timedelta(seconds=int(remaining_time)))
+                else:
+                    remaining_str = "计算中..."
+
+                logger.info(f"[视觉层][{name}]开始处理({idx}/{total_vision_layers}) | 剩余时间预估：{remaining_str}")
+
+                act = vision_activations.get(full_name, None)
+
                 if act is None or act.numel() == 0:
-                    logger.warning(f"No vision activations for layer {full_name}, skipping")
+                    logger.error(f"[视觉层][{name}]处理失败({idx}/{total_vision_layers}) | 原因：无激活值数据")
                     vision_layers_failed += 1
                     pbar.update(1)
                     pbar.set_postfix({
@@ -460,8 +492,7 @@ class OBRTrainer:
 
                     # 检查激活值形状是否与权重匹配
                     if act.shape[-1] != module.in_features:
-                        logger.warning(
-                            f"Activation shape {act.shape} doesn't match weight shape {module.weight.shape} for {full_name}, skipping")
+                        logger.error(f"[视觉层][{name}]处理失败({idx}/{total_vision_layers}) | 原因：激活值形状不匹配")
                         vision_layers_failed += 1
                         pbar.update(1)
                         pbar.set_postfix({
@@ -479,15 +510,19 @@ class OBRTrainer:
                         act,
                         target_ratio=self.config.compression.vision_pooling_ratio,
                         method=self.config.compression.pooling_method,
-                        device=str(layer_device)
+                        device=str(layer_device),
+                        layer_name=name,
+                        layer_idx=idx,
+                        total_layers=total_vision_layers
                     )
 
                     if success:
                         vision_layers_processed += 1
-                        logger.debug(f"视觉层 {name} - Adaptive Pooling压缩完成")
+                        logger.info(f"[视觉层][{name}]处理完成({idx}/{total_vision_layers})")
                     else:
                         vision_layers_failed += 1
-                        logger.warning(f"视觉层 {name} - Adaptive Pooling压缩失败")
+                        logger.error(
+                            f"[视觉层][{name}]处理失败({idx}/{total_vision_layers}) | 原因：Adaptive Pooling压缩过程中出错")
 
                     # 更新进度条
                     pbar.update(1)
@@ -498,7 +533,7 @@ class OBRTrainer:
                     })
 
                 except Exception as e:
-                    logger.error(f"Error compressing vision layer {name}: {e}")
+                    logger.error(f"[视觉层][{name}]处理失败({idx}/{total_vision_layers}) | 原因：{str(e)}")
                     vision_layers_failed += 1
                     pbar.update(1)
                     pbar.set_postfix({
@@ -508,9 +543,17 @@ class OBRTrainer:
                     })
                     continue
 
-        logger.info(f"=== 模型压缩完成 ===")
+        total_time = time.time() - start_time
+        logger.info(f"=== 模型压缩完成，总耗时: {str(timedelta(seconds=int(total_time)))} ===")
         logger.info(f"文本分支: 成功 {text_layers_processed} 层, 失败 {text_layers_failed} 层")
         logger.info(f"视觉分支: 成功 {vision_layers_processed} 层, 失败 {vision_layers_failed} 层")
+
+        # 计算整体成功率
+        total_layers = total_text_layers + total_vision_layers
+        total_success = text_layers_processed + vision_layers_processed
+        success_rate = (total_success / total_layers) * 100 if total_layers > 0 else 0
+        logger.info(f"整体成功率: {success_rate:.1f}% ({total_success}/{total_layers})")
+
         return model, processor
 
 
