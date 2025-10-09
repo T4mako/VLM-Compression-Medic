@@ -118,52 +118,38 @@ class OBRTrainer:
                     os.remove(os.path.join(cache_dir, f))
 
         def hook_fn(module, input, output, name, branch_type):
-            if output is None or not torch.is_tensor(output):
+            """
+            钩子收集 Linear 层的输入激活（论文OBR所需）
+            """
+            if input is None or len(input) == 0 or not torch.is_tensor(input[0]):
                 return
 
             try:
-                # 使用改进的激活值处理
-                out_cpu = process_activation_for_storage(output.detach().cpu())
+                inp = input[0].detach().cpu()
+                out_cpu = process_activation_for_storage(inp)
                 if out_cpu is None:
                     return
 
-                # 确定缓存目录
                 cache_dir = text_cache_dir if branch_type == "text" else vision_cache_dir
                 layer_path = os.path.join(cache_dir, f"{name}.pt")
 
-                # 保存激活值到磁盘
                 if os.path.exists(layer_path):
-                    try:
-                        # 加载现有激活值
-                        existing_acts = torch.load(layer_path)
-                        # 检查形状是否匹配
-                        if existing_acts.shape[1:] == out_cpu.shape[1:]:
-                            # 形状匹配，直接拼接
-                            combined_acts = torch.cat([existing_acts, out_cpu], dim=0)
-                            torch.save(combined_acts, layer_path)
-                            # logger.info(f"激活值已保存： {name}, new shape: {combined_acts.shape}")
-                            del existing_acts
-                        else:
-                            # 形状不匹配，使用新的处理策略
-                            logger.warning(
-                                f"Shape mismatch for {name}: existing {existing_acts.shape}, new {out_cpu.shape}")
-                            # 对现有激活值和新激活值分别计算平均，然后保存平均值
-                            existing_mean = existing_acts.mean(dim=0, keepdim=True)
-                            new_mean = out_cpu.mean(dim=0, keepdim=True)
-                            combined_mean = (existing_mean + new_mean) / 2
-                            torch.save(combined_mean, layer_path)
-                            del existing_acts
-                    except Exception as e:
-                        logger.error(f"Error merging activations for {name}: {e}")
-                        # 如果合并失败，保存新的激活值
-                        torch.save(out_cpu, layer_path)
+                    existing = torch.load(layer_path)
+                    if existing.shape[1:] == out_cpu.shape[1:]:
+                        combined = torch.cat([existing, out_cpu], dim=0)
+                        torch.save(combined, layer_path)
+                        del existing
+                    else:
+                        logger.warning(f"Shape mismatch for {name}: {existing.shape} vs {out_cpu.shape}")
+                        mean_existing = existing.mean(dim=0, keepdim=True)
+                        mean_new = out_cpu.mean(dim=0, keepdim=True)
+                        torch.save((mean_existing + mean_new) / 2, layer_path)
+                        del existing
                 else:
-                    # 第一次保存
                     torch.save(out_cpu, layer_path)
-                    # logger.info(f"首次保存激活值： {name}, shape: {out_cpu.shape}")
 
             except Exception as e:
-                logger.error(f"Failed to save activations for {name}: {e}")
+                logger.error(f"Failed to save input activations for {name}: {e}")
 
         hooks = []
 
