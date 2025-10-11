@@ -1,70 +1,177 @@
 import torch
 import torch.nn as nn
-from typing import Optional
 from logger import logger
 from tqdm import tqdm
 
 
-# 计算 Hessian 近似
-def compute_hessian_approx(activations: torch.Tensor) -> torch.Tensor:
+def compute_hessian_global(activations: torch.Tensor, damping: float = 1e-6,
+                           layer_name: str = "unknown") -> torch.Tensor:
     """
-    Compute Hessian approximation in the input-feature space.
-    Correct formula: H ≈ 2 * X^T X (shape: [Cin, Cin]) when activations X has shape [N, Cin].
+    全局 Hessian 近似：H = 2 * A^T A / N + damping * I
     """
     if activations is None:
-        raise ValueError("activations is None in compute_hessian_approx")
-    x = activations
-    if x.dim() == 1:
-        x = x.unsqueeze(0)
-
-    # logger.debug(f"Computing Hessian: input shape {x.shape}")
-
-    # 添加正则化防止矩阵奇异
-    H = 2.0 * torch.matmul(x.t(), x)
-    # 添加对角正则化
-    H = H + 1e-6 * torch.eye(H.size(0), device=H.device, dtype=H.dtype)
-
-    # logger.debug(f"Hessian computed: shape {H.shape}, condition number: {torch.linalg.cond(H):.2f}")
-    return H
-
-
-# OBR 补偿计算
-def obr_compensation(
-        weights_row: torch.Tensor,
-        hessian: torch.Tensor,
-        eviction_mask: torch.Tensor,
-        error_row: torch.Tensor,
-        device: str = "cuda"
-) -> torch.Tensor:
-    """
-    Compute row-wise OBR compensation for one output channel.
-    Δw_R = -H_RR^{-1} H_RE e_E
-    All tensors are 1D (Cin).
-    """
-    mask_flat = eviction_mask.view(-1).bool()
-    R_mask = ~mask_flat
-    E_mask = mask_flat
-
-    if R_mask.sum() == 0 or E_mask.sum() == 0:
-        return torch.zeros_like(weights_row, device=device)
+        logger.error(f"[{layer_name}] activations is None for Hessian")
+        return None
 
     try:
-        H_RR = hessian[R_mask][:, R_mask]
-        H_RE = hessian[R_mask][:, E_mask]
-        e_E = error_row[E_mask].to(device)
+        A = activations
+        if A.dim() == 1:
+            A = A.unsqueeze(0)
 
-        reg_eye = 1e-6 * torch.eye(H_RR.size(0), device=device, dtype=H_RR.dtype)
-        H_RR_pinv = torch.linalg.pinv(H_RR + reg_eye)
-        H_RE_e = torch.matmul(H_RE, e_E)
-        delta_w_R = -torch.matmul(H_RR_pinv, H_RE_e)
+        # 强制 float32
+        if A.dtype != torch.float32:
+            logger.info(f"[{layer_name}] 将 activations 转为 float32（原始 dtype={A.dtype}）")
+            A = A.to(torch.float32)
 
-        comp = torch.zeros_like(weights_row, device=device)
-        comp[R_mask] = delta_w_R
-        return comp
+        # 计算 H = 2 * A^T A / N （正确的OBR公式）
+        N = max(1, A.size(0))
+        H = 2.0 * (A.t() @ A) / float(N)
+
+        # 更强的阻尼应对大条件数
+        damping_coeff = max(damping, 1e-4)  # 增加最小阻尼
+        H = H + damping_coeff * torch.eye(H.size(0), device=H.device, dtype=H.dtype)
+
+        # 检查条件数
+        try:
+            cond = torch.linalg.cond(H).item()
+            logger.info(f"[{layer_name}] Hessian shape={H.shape}, cond={cond:.2e}")
+
+            if cond > 1e8:
+                logger.warning(f"[{layer_name}] Hessian 条件数过大，使用更强的对角加载")
+                # 增加对角加载
+                diag_boost = 1e-3 * torch.diag(H).mean().item()
+                H = H + diag_boost * torch.eye(H.size(0), device=H.device, dtype=H.dtype)
+
+        except Exception:
+            pass
+
+        return H
 
     except Exception as e:
-        logger.warning(f"OBR compensation failed on one row: {e}")
-        return torch.zeros_like(weights_row, device=device)
+        logger.error(f"[{layer_name}] ❌ Hessian computation failed: {e}")
+        return None
+
+
+def correct_global_obr_compensation(
+        W: torch.Tensor,
+        H: torch.Tensor,
+        mask: torch.Tensor,
+        error: torch.Tensor,
+        alpha: float = 0.5,
+        layer_name: str = "unknown"
+) -> (torch.Tensor, int):
+    """
+    正确的全局OBR补偿实现
+    数学原理：Δw = -H_RR^{-1} H_RE e_E，但需要按剪枝模式分组处理
+    """
+    device = W.device
+    Cout, Cin = W.shape
+
+    try:
+        # 确保数据类型一致
+        H = H.to(device).to(torch.float32)
+        error = error.to(device).to(torch.float32)
+        mask = mask.to(device).bool()
+
+        # 初始化补偿矩阵
+        delta_W = torch.zeros_like(W)
+        applied_count = 0
+
+        # 由于全局剪枝，所有行有相同的剪枝模式
+        R_mask = ~mask[0]  # 保留的位置 [Cin]
+        E_mask = mask[0]  # 剪枝的位置 [Cin]
+
+        if R_mask.sum() == 0 or E_mask.sum() == 0:
+            logger.info(f"[{layer_name}] 没有有效的剪枝模式，跳过补偿")
+            return delta_W, 0
+
+        # 提取Hessian子矩阵
+        H_RR = H[R_mask][:, R_mask]  # [|R|, |R|]
+        H_RE = H[R_mask][:, E_mask]  # [|R|, |E|]
+
+        # 所有行的剪枝误差（剪枝部分）
+        error_E = error[:, E_mask]  # [Cout, |E|]
+
+        logger.info(f"[{layer_name}] 剪枝模式: R={R_mask.sum().item()}, E={E_mask.sum().item()}")
+
+        try:
+            # 计算补偿：Δw_R = -H_RR^{-1} H_RE e_E
+            # 对于所有行：Δw_R_all = -H_RR^{-1} H_RE error_E^T
+
+            # 1. 计算 H_RE * error_E^T
+            H_RE_e = torch.matmul(H_RE, error_E.T)  # [|R|, Cout]
+
+            # 2. 求解 H_RR * X = H_RE_e
+            try:
+                # 使用Cholesky分解（更稳定）
+                L = torch.linalg.cholesky(H_RR + 1e-4 * torch.eye(H_RR.size(0), device=device))
+                y = torch.linalg.solve_triangular(L, H_RE_e, upper=False)
+                delta_w_R_all = -alpha * torch.linalg.solve_triangular(L.t(), y, upper=True)  # [|R|, Cout]
+            except:
+                # Cholesky失败时使用伪逆
+                logger.warning(f"[{layer_name}] Cholesky失败，使用伪逆")
+                H_RR_pinv = torch.linalg.pinv(H_RR + 1e-4 * torch.eye(H_RR.size(0), device=device))
+                delta_w_R_all = -alpha * torch.matmul(H_RR_pinv, H_RE_e)  # [|R|, Cout]
+
+            # 3. 将补偿放回正确位置
+            delta_w_R_all = delta_w_R_all.T  # [Cout, |R|]
+            delta_W[:, R_mask] = delta_w_R_all
+
+            # 统计应用补偿的行数
+            row_norms = delta_W.norm(dim=1)
+            applied_count = (row_norms > 1e-8).sum().item()
+
+            logger.info(f"[{layer_name}] 补偿计算完成, ΔW范围: [{delta_W.min():.4f}, {delta_W.max():.4f}]")
+            logger.info(f"[{layer_name}] 补偿范数: {delta_W.norm():.4e}, 应用行数: {applied_count}/{Cout}")
+
+        except Exception as e:
+            logger.warning(f"[{layer_name}] 补偿计算失败: {e}")
+            return torch.zeros_like(W), 0
+
+        return delta_W, applied_count
+
+    except Exception as e:
+        logger.error(f"[{layer_name}] 全局补偿完全失败: {e}")
+        return torch.zeros_like(W), 0
+
+
+def safe_quantization(weights: torch.Tensor, bits: int = 4, layer_name: str = "unknown") -> torch.Tensor:
+    """
+    安全的量化实现，防止异常值
+    """
+    Cout, Cin = weights.shape
+    W_quantized = torch.zeros_like(weights)
+
+    # 检查权重范围
+    weight_abs_max = weights.abs().max().item()
+    logger.info(
+        f"[{layer_name}] 量化前权重范围: [{weights.min():.4f}, {weights.max():.4f}], 绝对最大值: {weight_abs_max:.4f}")
+
+    # 如果权重范围过大，先进行裁剪
+    if weight_abs_max > 1000:  # 阈值可根据实际情况调整
+        logger.warning(f"[{layer_name}] 权重范围过大，进行安全裁剪")
+        safe_scale = 1000.0 / weight_abs_max
+        weights = weights * safe_scale
+
+    qmin = -(2 ** (bits - 1))
+    qmax = 2 ** (bits - 1) - 1
+
+    for i in range(Cout):
+        w_row = weights[i]
+        max_abs = w_row.abs().max().clamp(min=1e-8)
+
+        # 安全检查
+        if max_abs > 1e6:
+            logger.warning(f"[{layer_name}] 第{i}行权重范围异常，跳过量化")
+            W_quantized[i] = w_row
+            continue
+
+        scale = max_abs / (2 ** (bits - 1))
+        q = torch.round(w_row / scale)
+        q = torch.clamp(q, qmin, qmax)
+        W_quantized[i] = q * scale
+
+    return W_quantized
 
 
 def apply_obr_to_linear(
@@ -79,184 +186,105 @@ def apply_obr_to_linear(
         total_layers: int = 0
 ) -> bool:
     """
-    Apply OBR to a single linear layer (row-wise pruning + compensation + quantization).
+    修复后的OBR压缩实现
     """
     try:
-        W = layer.weight.data.clone().to(device).float()  # [Cout, Cin]
-        Cin = W.shape[1]
-        Cout = W.shape[0]
+        logger.info(f"[文本层][{layer_name}]开始处理({layer_idx}/{total_layers}) | 形状: {tuple(layer.weight.shape)}")
+        orig_dtype = layer.weight.data.dtype
+        W_original = layer.weight.data.clone().to(device).to(torch.float32)
+        Cout, Cin = W_original.shape
+
+        original_norm = W_original.norm().item()
+        logger.info(f"[{layer_name}] 原始权重范数: {original_norm:.4e}")
+
+        # 激活值检查
+        if activations is None or activations.numel() == 0:
+            logger.error(f"[文本层][{layer_name}] 激活为空，跳过该层")
+            return False
 
         if activations.dim() == 1:
             activations = activations.unsqueeze(0)
-
         if activations.shape[-1] != Cin:
-            logger.error(f"[{layer_name}] 激活值形状与Linear输入不匹配: {activations.shape} vs Cin={Cin}")
+            logger.error(f"[文本层][{layer_name}] 激活值形状不匹配 {activations.shape} vs Cin={Cin}")
             return False
 
-        if activations.shape[0] < Cin:
-            repeat_times = (Cin // activations.shape[0]) + 1
-            activations = activations.repeat(repeat_times, 1)[:Cin, :]
+        activations = activations.to(device)
 
+        # === 1. Hessian计算 ===
         logger.info(f"[文本层][{layer_name}] 计算 Hessian ({layer_idx}/{total_layers})")
-        H_in = compute_hessian_approx(activations.to(device).float())
+        H = compute_hessian_global(activations, damping=1e-4, layer_name=layer_name)
+        if H is None:
+            logger.warning(f"[{layer_name}] Hessian 计算失败，跳过补偿")
+            # 仍然进行剪枝和量化
+            H = torch.eye(Cin, device=device)  # 使用单位矩阵作为回退
 
-        # === Row-wise pruning ===
-        logger.info(f"[文本层][{layer_name}] Row-wise 剪枝({layer_idx}/{total_layers})")
-        W_pruned = W.clone()
-        prune_masks = []
-        prune_ratios = []
+        # === 2. 全局剪枝 ===
+        logger.info(f"[文本层][{layer_name}] 全局剪枝({layer_idx}/{total_layers})")
+        W_abs = W_original.abs()
+        flat_abs = W_abs.view(-1)
+        k = int(sparsity * flat_abs.numel())
 
-        for i in range(Cout):
-            row = W[i]
-            importance = row.abs() ** 2
-            num_inputs = importance.numel()
-            k = max(1, min(num_inputs - 1, int(sparsity * num_inputs)))
-
-            if k < num_inputs:
-                threshold = torch.quantile(importance, sparsity)
-                mask = importance < threshold
-            else:
-                mask = torch.zeros_like(importance, dtype=torch.bool)
-
-            prune_masks.append(mask)
-            prune_ratios.append(mask.float().mean().item())
-            W_pruned[i, mask] = 0.0
-
-        avg_prune_ratio = sum(prune_ratios) / len(prune_ratios)
-        logger.info(f"[文本层][{layer_name}] 平均剪枝比例: {avg_prune_ratio:.3f}")
-
-        # === Row-wise compensation ===
-        logger.info(f"[文本层][{layer_name}] Row-wise 补偿({layer_idx}/{total_layers})")
-        pruning_error = W - W_pruned
-        W_comp = W_pruned.clone()
-        compensation_applied = 0
-
-        for i in tqdm(range(Cout), desc="OBR Compensation", ncols=80):
-            mask_i = prune_masks[i]
-            error_i = pruning_error[i]
-
-            if error_i[mask_i].abs().sum() < 1e-8:
-                continue
-
-            comp_i = obr_compensation(
-                W_pruned[i],
-                H_in,
-                mask_i,
-                error_i,
-                device
-            )
-            if comp_i.norm().item() > 1e-6:
-                W_comp[i] += comp_i
-                compensation_applied += 1
-
-        logger.info(f"[文本层][{layer_name}] 补偿应用到 {compensation_applied}/{Cout} 个输出通道")
-
-        # === Row-wise quantization ===
-        logger.info(f"[文本层][{layer_name}] Row-wise 量化({layer_idx}/{total_layers})")
-        W_quantized = torch.zeros_like(W_comp)
-        quant_errors = []
-
-        for i in range(Cout):
-            w_row = W_comp[i]
-            max_abs = w_row.abs().max().clamp(min=1e-8)
-            scale = max_abs / ((2 ** (bits - 1)) - 1)
-            q = torch.round(w_row / scale)
-            q = torch.clamp(q, -(2 ** (bits - 1)), 2 ** (bits - 1) - 1)
-            W_quantized[i] = q * scale
-            quant_errors.append((w_row - W_quantized[i]).norm().item())
-
-        avg_quant_error = sum(quant_errors) / len(quant_errors)
-        original_norm = torch.norm(W).item()
-        compressed_norm = torch.norm(W_quantized).item()
-        norm_ratio = compressed_norm / original_norm if original_norm > 0 else 1.0
-
-        layer.weight.data = W_quantized.to(layer.weight.data.dtype)
-
-        logger.info(f"[文本层][{layer_name}] 压缩统计")
-        logger.info(f"  层形状: {W.shape}")
-        logger.info(f"  平均剪枝比例: {avg_prune_ratio:.3f}")
-        logger.info(f"  补偿应用: {compensation_applied}/{Cout} 通道")
-        logger.info(f"  量化位数: {bits}")
-        logger.info(f"  范数比率: {norm_ratio:.3f}")
-        logger.info(f"  平均量化误差: {avg_quant_error:.6f}")
-
-        return True
-
-    except Exception as e:
-        logger.error(f"[文本层][{layer_name}] OBR 压缩失败: {e}")
-        return False
-
-def apply_adaptive_pooling_to_linear(
-        layer: nn.Linear,
-        activations: torch.Tensor,
-        target_ratio: float = 0.5,
-        method: str = "adaptive_avg",
-        device: str = "cuda",
-        layer_name: str = "unknown",
-        layer_idx: int = 0,
-        total_layers: int = 0
-) -> bool:
-    """
-    使用自适应池化压缩线性层
-    Returns True if successful, False otherwise.
-    """
-    try:
-        logger.info(f"[视觉层][{layer_name}]开始池化压缩({layer_idx}/{total_layers})")
-
-        W = layer.weight.data.clone().to(device).to(torch.float32)
-        original_in_features = layer.in_features
-        original_out_features = layer.out_features
-
-        target_in_features = max(1, int(original_in_features * target_ratio))
-        target_out_features = max(1, int(original_out_features * target_ratio))
-
-        logger.info(f"[视觉层][{layer_name}]目标维度: {original_in_features}->{target_in_features}, "
-                    f"{original_out_features}->{target_out_features}")
-
-        if method == "adaptive_avg":
-            pool_in = nn.AdaptiveAvgPool1d(target_in_features)
-            pool_out = nn.AdaptiveAvgPool1d(target_out_features)
-        elif method == "adaptive_max":
-            pool_in = nn.AdaptiveMaxPool1d(target_in_features)
-            pool_out = nn.AdaptiveMaxPool1d(target_out_features)
+        if k > 0 and k < flat_abs.numel():
+            threshold = torch.topk(flat_abs, k, largest=False).values.max().item()
         else:
-            raise ValueError(f"不支持的池化方法: {method}")
+            threshold = -1.0
 
-        # 对输入维度应用池化
-        with torch.no_grad():
-            W_reshaped = W.view(original_out_features, 1, original_in_features)
-            W_pooled_input = pool_in(W_reshaped)
-            W_pooled_input = W_pooled_input.view(original_out_features, target_in_features)
+        mask = (W_abs > threshold)
+        avg_prune_ratio = 1.0 - mask.float().mean().item()
+        W_pruned = W_original * mask
 
-            W_transposed = W_pooled_input.view(1, original_out_features, target_in_features).transpose(1, 2)
-            W_pooled_output = pool_out(W_transposed)
-            W_pooled_output = W_pooled_output.view(target_in_features, target_out_features).transpose(0, 1)
+        logger.info(f"[文本层][{layer_name}] 平均剪枝比例: {avg_prune_ratio:.3f}")
+        logger.info(f"[{layer_name}] 剪枝后范数: {W_pruned.norm().item():.4e}")
 
-        # 更新层权重
-        layer.weight.data = W_pooled_output
+        # === 3. 正确的全局补偿 ===
+        logger.info(f"[文本层][{layer_name}] 全局补偿({layer_idx}/{total_layers})")
+        pruning_error = W_original - W_pruned
 
-        # 如果有偏置，也需要相应调整
-        if layer.bias is not None:
-            bias_reshaped = layer.bias.view(1, 1, original_out_features)
-            bias_pooled = pool_out(bias_reshaped)
-            layer.bias.data = bias_pooled.view(target_out_features)
+        # 使用正确的补偿实现
+        delta_W, applied = correct_global_obr_compensation(
+            W_pruned, H, mask, pruning_error, alpha=alpha, layer_name=layer_name
+        )
 
-        # 更新层的in_features和out_features
-        layer.in_features = target_in_features
-        layer.out_features = target_out_features
+        W_comp = W_pruned + delta_W
+        comp_norm = W_comp.norm().item()
+        logger.info(f"[文本层][{layer_name}] 补偿应用到 {applied}/{Cout} 个输出通道")
+        logger.info(f"[{layer_name}] 补偿后范数: {comp_norm:.4e}")
 
-        # 计算压缩统计
-        original_params = original_in_features * original_out_features
-        compressed_params = target_in_features * target_out_features
-        compression_ratio = compressed_params / original_params
+        # === 4. 安全量化 ===
+        logger.info(f"[文本层][{layer_name}] 安全量化({layer_idx}/{total_layers})")
+        W_quantized = safe_quantization(W_comp, bits=bits, layer_name=layer_name)
 
-        logger.info(f"[视觉层][{layer_name}]池化压缩完成({layer_idx}/{total_layers})")
-        logger.info(f"  原始: {original_out_features}x{original_in_features} = {original_params} 参数")
-        logger.info(f"  压缩: {target_out_features}x{target_in_features} = {compressed_params} 参数")
-        logger.info(f"  压缩比例: {compression_ratio:.3f}")
+        # 计算统计信息
+        quantized_norm = W_quantized.norm().item()
+        norm_ratio = quantized_norm / (original_norm + 1e-12)
+        quant_error = (W_comp - W_quantized).norm().item() / Cout  # 平均每行误差
+
+        logger.info(f"[{layer_name}] 量化后范数: {quantized_norm:.4e}")
+
+        # === 5. 更新权重 ===
+        layer.weight.data = W_quantized.to(orig_dtype)
+
+        # === 6. 最终统计 ===
+        logger.info(f"[文本层][{layer_name}] 压缩统计")
+        logger.info(f"  层形状: {W_original.shape}")
+        logger.info(f"  平均剪枝比例: {avg_prune_ratio:.3f}")
+        logger.info(f"  补偿应用: {applied}/{Cout} 通道")
+        logger.info(f"  量化位数: {bits}")
+        logger.info(f"  范数比率: {norm_ratio:.3f} (应该接近1.0)")
+        logger.info(f"  平均量化误差: {quant_error:.6f}")
+
+        # 关键检查
+        if norm_ratio > 2.0 or norm_ratio < 0.5:
+            logger.warning(f"[{layer_name}] ⚠️ 范数比率异常! 正常范围应该在0.8-1.2之间")
+        if quant_error > 1.0:
+            logger.warning(f"[{layer_name}] ⚠️ 量化误差过大!")
+
+        logger.info(f"[文本层][{layer_name}]处理完成({layer_idx}/{total_layers})")
 
         return True
 
     except Exception as e:
-        logger.error(f"[视觉层][{layer_name}]自适应池化失败: {e}")
+        logger.error(f"[文本层][{layer_name}] ❌ OBR 压缩失败: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return False

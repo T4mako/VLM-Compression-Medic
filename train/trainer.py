@@ -126,8 +126,13 @@ class OBRTrainer:
 
             try:
                 inp = input[0].detach().cpu()
+
+                # 添加调试信息
+                logger.debug(f"收集激活值: {name}, 形状: {inp.shape}, 分支: {branch_type}")
+
                 out_cpu = process_activation_for_storage(inp)
                 if out_cpu is None:
+                    logger.warning(f"激活值处理为空: {name}")
                     return
 
                 cache_dir = text_cache_dir if branch_type == "text" else vision_cache_dir
@@ -137,10 +142,14 @@ class OBRTrainer:
                     existing = torch.load(layer_path)
                     if existing.shape[1:] == out_cpu.shape[1:]:
                         combined = torch.cat([existing, out_cpu], dim=0)
+                        # 限制缓存大小，防止内存爆炸
+                        if combined.shape[0] > 100:  # 最多保存100个样本
+                            combined = combined[-100:]
                         torch.save(combined, layer_path)
                         del existing
                     else:
-                        logger.warning(f"Shape mismatch for {name}: {existing.shape} vs {out_cpu.shape}")
+                        logger.warning(f"形状不匹配 {name}: {existing.shape} vs {out_cpu.shape}")
+                        # 使用平均值合并
                         mean_existing = existing.mean(dim=0, keepdim=True)
                         mean_new = out_cpu.mean(dim=0, keepdim=True)
                         torch.save((mean_existing + mean_new) / 2, layer_path)
@@ -149,21 +158,50 @@ class OBRTrainer:
                     torch.save(out_cpu, layer_path)
 
             except Exception as e:
-                logger.error(f"Failed to save input activations for {name}: {e}")
+                logger.error(f"保存激活值失败 {name}: {e}")
 
         hooks = []
 
         lm = getattr(model, self.config.model.language_model_name)
         from functools import partial
+
+        # 只处理关键线性层，跳过小层
+        critical_layers = ['q_proj', 'k_proj', 'v_proj', 'o_proj', 'gate_proj', 'up_proj', 'down_proj', 'qkv', 'proj']
+
+        # 文本分支钩子
         for name, module in lm.named_modules():
-            if isinstance(module, torch.nn.Linear):
+            if isinstance(module, torch.nn.Linear) and any(layer in name for layer in critical_layers):
+                hook = partial(hook_fn, name=f"text.{name}", branch_type="text")
+                hooks.append(module.register_forward_hook(hook))
+                logger.debug(f"注册文本钩子: text.{name}")
+
+        # 为视觉分支注册钩子
+        vision_encoder = getattr(model, self.config.model.vision_encoder_name)
+        for name, module in vision_encoder.named_modules():
+            if isinstance(module, torch.nn.Linear) and any(layer in name for layer in critical_layers):
+                hook = partial(hook_fn, name=f"vision.{name}", branch_type="vision")
+                hooks.append(module.register_forward_hook(hook))
+                logger.debug(f"注册视觉钩子: vision.{name}")
+
+        logger.info(f"视觉编码器类型: {type(vision_encoder)}")
+        logger.info(f"视觉编码器设备: {next(vision_encoder.parameters()).device}")
+        logger.info(f"注册了 {len(hooks)} 个钩子")
+
+        hooks = []
+
+        lm = getattr(model, self.config.model.language_model_name)
+        from functools import partial
+        # 只处理关键线性层，跳过小层
+        critical_layers = ['q_proj', 'k_proj', 'v_proj', 'o_proj', 'gate_proj', 'up_proj', 'down_proj']
+        for name, module in lm.named_modules():
+            if isinstance(module, torch.nn.Linear) and any(layer in name for layer in critical_layers):
                 hook = partial(hook_fn, name=f"text.{name}", branch_type="text")
                 hooks.append(module.register_forward_hook(hook))
 
         # 为视觉分支注册钩子
         vision_encoder = getattr(model, self.config.model.vision_encoder_name)
         for name, module in vision_encoder.named_modules():
-            if isinstance(module, torch.nn.Linear):
+            if isinstance(module, torch.nn.Linear) and any(layer in name for layer in critical_layers):
                 hook = partial(hook_fn, name=f"vision.{name}", branch_type="vision")
                 hooks.append(module.register_forward_hook(hook))
 
@@ -215,6 +253,10 @@ class OBRTrainer:
 
                     with torch.no_grad():
                         out = model(**inputs)
+
+                    del inputs, out
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
 
                     processed_samples += 1
 
@@ -296,6 +338,13 @@ class OBRTrainer:
         return {"text": text_avg, "vision": vision_avg}
 
     def compress_model(self):
+
+        # 添加层跳过机制，只压缩大层
+        def should_compress_layer(layer, min_params=10000):
+            """只压缩参数数量超过阈值的层"""
+            total_params = layer.in_features * layer.out_features
+            return total_params >= min_params
+
         model, processor = load_huatuo_vision_model(
             self.config.model.model_name,
             device=self.config.training.device,
@@ -324,7 +373,7 @@ class OBRTrainer:
         # 先统计文本分支的线性层数量
         text_linear_layers = []
         for name, module in lm.named_modules():
-            if isinstance(module, torch.nn.Linear):
+            if isinstance(module, torch.nn.Linear) and should_compress_layer(module):
                 text_linear_layers.append((name, module))
 
         total_text_layers = len(text_linear_layers)
@@ -423,15 +472,31 @@ class OBRTrainer:
                     })
                     continue
 
-        # 视觉分支：使用 Adaptive Pooling 压缩
+        # 视觉分支：使用 Adaptive Pooling 压缩 （与之前逻辑一致）
         logger.info("=== 开始压缩视觉分支（Adaptive Pooling）===")
         vision_encoder = getattr(model, self.config.model.vision_encoder_name)
 
-        # 先统计视觉分支的线性层数量
+        # 先检查激活值缓存
+        vision_cache_dir = os.path.join(self.config.data.activation_cache_dir, "vision")
+        if os.path.exists(vision_cache_dir):
+            cache_files = [f for f in os.listdir(vision_cache_dir) if f.endswith('.pt')]
+            logger.info(f"视觉分支激活值缓存文件: {len(cache_files)} 个")
+            for f in cache_files[:10]:  # 只显示前10个
+                layer_path = os.path.join(vision_cache_dir, f)
+                acts = torch.load(layer_path, map_location="cpu")
+                logger.info(f"  {f}: {acts.shape}")
+        else:
+            logger.warning("视觉分支激活值缓存目录不存在")
+
         vision_linear_layers = []
         for name, module in vision_encoder.named_modules():
             if isinstance(module, torch.nn.Linear):
                 vision_linear_layers.append((name, module))
+                full_name = f"vision.{name}"
+                if full_name in vision_activations:
+                    logger.debug(f"找到激活值: {name} -> {vision_activations[full_name].shape}")
+                else:
+                    logger.debug(f"未找到激活值: {name}")
 
         total_vision_layers = len(vision_linear_layers)
         logger.info(f"视觉分支共有 {total_vision_layers} 个线性层需要压缩")
@@ -440,13 +505,11 @@ class OBRTrainer:
         vision_layers_failed = 0
         vision_start_time = time.time()
 
-        # 使用tqdm显示进度条
         with tqdm(total=total_vision_layers, desc="压缩视觉分支", unit="layer") as pbar:
             for idx, (name, module) in enumerate(vision_linear_layers, 1):
                 full_name = f"vision.{name}"
                 layer_device = next(module.parameters()).device
 
-                # 计算剩余时间预估
                 elapsed_time = time.time() - vision_start_time
                 if vision_layers_processed > 0:
                     avg_time_per_layer = elapsed_time / vision_layers_processed
@@ -472,11 +535,9 @@ class OBRTrainer:
                     continue
 
                 try:
-                    # 确保激活值形状正确
                     if act.dim() == 1:
                         act = act.unsqueeze(0)
 
-                    # 检查激活值形状是否与权重匹配
                     if act.shape[-1] != module.in_features:
                         logger.error(f"[视觉层][{name}]处理失败({idx}/{total_vision_layers}) | 原因：激活值形状不匹配")
                         vision_layers_failed += 1
@@ -510,7 +571,6 @@ class OBRTrainer:
                         logger.error(
                             f"[视觉层][{name}]处理失败({idx}/{total_vision_layers}) | 原因：Adaptive Pooling压缩过程中出错")
 
-                    # 更新进度条
                     pbar.update(1)
                     pbar.set_postfix({
                         "成功": vision_layers_processed,
@@ -534,7 +594,6 @@ class OBRTrainer:
         logger.info(f"文本分支: 成功 {text_layers_processed} 层, 失败 {text_layers_failed} 层")
         logger.info(f"视觉分支: 成功 {vision_layers_processed} 层, 失败 {vision_layers_failed} 层")
 
-        # 计算整体成功率
         total_layers = total_text_layers + total_vision_layers
         total_success = text_layers_processed + vision_layers_processed
         success_rate = (total_success / total_layers) * 100 if total_layers > 0 else 0

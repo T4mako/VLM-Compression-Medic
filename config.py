@@ -7,9 +7,9 @@ class DataConfig:
     local_root: str = "../machine-unlearning-VLM/data/PubMedVision_repo"
     alignment_path: str = "../machine-unlearning-VLM/data/PubMedVision_Alignment_VQA"
     cache_dir: str = "./data/cache"
-    debug_limit: Optional[int] = 512
-    dn_ratio: float = 1.0  # 保留比例
-    calib_size: int = 256  # 校准集大小
+    debug_limit: Optional[int] = 64
+    dn_ratio: float = 0.1  # 保留比例
+    calib_size: int = 16  # 校准集大小
     calib_batch_size: int = 4  # 校准时的批次大小
     num_workers: int = 0
     pin_memory: bool = True
@@ -23,7 +23,7 @@ class ModelConfig:
     vision_encoder_name: str = "visual"
     projector_name: str = "mm_projector"
     language_model_name: str = "language_model"
-    use_rotation: bool = True
+    use_rotation: bool = False
     rotation_type: str = "FlatQuant"  # "QuaRot", "SpinQuant", "FlatQuant"
     vit_compress_mode: str = "pooling"      # "pooling" or "token_pruning"
     vit_target_tokens: int = 64             # 推荐 64~100
@@ -31,10 +31,10 @@ class ModelConfig:
 @dataclass
 class CompressionConfig:
     # Language branch
-    lm_bits: int = 4
+    lm_bits: int = 8
     lm_sparsity: float = 0.5
     lm_use_obr: bool = True
-    lm_quantizer: str = "GPTQ"  # "RTN", "GPTQ"
+    lm_quantizer: str = "RTN"  # "RTN", "GPTQ"
 
     # Vision branch
     vision_bits: int = 4
@@ -49,7 +49,7 @@ class CompressionConfig:
     projector_sparsity: float = 0.0
 
     # OBR specific
-    alpha: float = 0.5  # quantization grouping ratio
+    alpha: float = 0.8  # quantization grouping ratio
 
 @dataclass
 class TrainingConfig:
