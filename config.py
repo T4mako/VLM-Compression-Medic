@@ -1,6 +1,8 @@
 import os
 from dataclasses import dataclass, field
 from typing import Optional, List
+import argparse
+import json
 
 @dataclass
 class DataConfig:
@@ -9,7 +11,7 @@ class DataConfig:
     cache_dir: str = "./data/cache"
     debug_limit: Optional[int] = 64
     dn_ratio: float = 0.1  # 保留比例
-    calib_size: int = 16  # 校准集大小
+    calib_size: int = 256 # 校准集大小
     calib_batch_size: int = 4  # 校准时的批次大小
     num_workers: int = 0
     pin_memory: bool = True
@@ -43,6 +45,7 @@ class CompressionConfig:
     vision_pruner: str = "WANDA"
     vision_pooling_ratio: float = 0.7
     pooling_method: str = "adaptive_avg"  # adaptive_avg or adaptive_max
+    vision_target_ratio: float = 0.8  # 目标压缩比例
 
     # Projector
     projector_bits: int = 16  # 16=FP16, 8=INT8
@@ -65,24 +68,33 @@ class EvalConfig:
     metrics: List[str] = field(default_factory=lambda: ["perplexity"])
     eval_batch_size: int = 1
 
+
 @dataclass
 class Config:
+    """主配置类，支持从命令行或JSON加载"""
     data: DataConfig = field(default_factory=DataConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     compression: CompressionConfig = field(default_factory=CompressionConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
     eval: EvalConfig = field(default_factory=EvalConfig)
+    mode: str = "compress"
 
     @classmethod
     def from_args(cls):
-        import argparse
+        """支持 --config 和 --mode 两个命令行参数"""
         parser = argparse.ArgumentParser()
-        parser.add_argument("--config", type=str, default=None)
-        # 可扩展更多命令行参数
+        parser.add_argument("--config", type=str, default=None, help="Path to JSON config file")
+        parser.add_argument("--mode", type=str, choices=["compress", "eval"], default="compress")
         args = parser.parse_args()
+
+        # 如果传入了 JSON 配置文件，先加载
         if args.config:
-            import json
-            with open(args.config) as f:
+            with open(args.config, "r") as f:
                 data = json.load(f)
-                return cls(**{k: v for k, v in data.items() if hasattr(cls, k)})
-        return cls()
+            cfg = cls(**{k: v for k, v in data.items() if hasattr(cls, k)})
+        else:
+            cfg = cls()
+
+        # 更新 mode 参数
+        cfg.mode = args.mode
+        return cfg

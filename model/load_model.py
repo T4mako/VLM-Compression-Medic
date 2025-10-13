@@ -14,11 +14,11 @@ def load_huatuo_vision_model(
     vit_target_tokens: int = 64              # 目标 token 数，如 64 = 8x8
 ):
     logger.info(f"Loading model: {model_name}")
-    
+
     cache_dir = os.path.expanduser("~/.cache/huggingface/hub")
 
-    
-    
+
+
     # 加载模型
     if "Qwen2" in model_name and "VL" in model_name:
         logger.info(f"Loading Qwen VL model with AutoModelForVision2Seq from local cache")
@@ -31,18 +31,46 @@ def load_huatuo_vision_model(
             cache_dir=cache_dir
         ).to(device)
     else:
-        logger.info(f"Loading model with AutoModelForCausalLM from local cache")
-        model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            torch_dtype=torch.float16,
-            low_cpu_mem_usage=True,
-            trust_remote_code=True,
-            local_files_only=True,
-            cache_dir=cache_dir
-        ).to(device)
+        # 兼容 Qwen2.5-VL 压缩模型
+        if os.path.exists(os.path.join(model_name, "config.json")):
+            import json
+            with open(os.path.join(model_name, "config.json")) as f:
+                cfg = json.load(f)
+            arch = cfg.get("architectures", [""])[0]
+            if "Vision" in arch or "VL" in arch or "Qwen2_5_VL" in arch:
+                logger.info("Detected vision-language config → using AutoModelForVision2Seq")
+                model = AutoModelForVision2Seq.from_pretrained(
+                    model_name,
+                    torch_dtype=torch.float16,
+                    low_cpu_mem_usage=True,
+                    trust_remote_code=True,
+                    local_files_only=True,
+                    cache_dir=cache_dir
+                ).to(device)
+            else:
+                logger.info("Detected language-only config → using AutoModelForCausalLM")
+                model = AutoModelForCausalLM.from_pretrained(
+                    model_name,
+                    torch_dtype=torch.float16,
+                    low_cpu_mem_usage=True,
+                    trust_remote_code=True,
+                    local_files_only=True,
+                    cache_dir=cache_dir
+                ).to(device)
+        else:
+            # fallback
+            logger.info("Fallback to AutoModelForCausalLM")
+            model = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                torch_dtype=torch.float16,
+                low_cpu_mem_usage=True,
+                trust_remote_code=True,
+                local_files_only=True,
+                cache_dir=cache_dir
+            ).to(device)
 
     print("Weight dtype:", model.language_model.layers[0].self_attn.q_proj.weight.dtype)
-        
+
     # 加载 processor
     processor = AutoProcessor.from_pretrained(
         model_name,
